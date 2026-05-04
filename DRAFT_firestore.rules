@@ -1,0 +1,92 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isEmailVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function isAdmin() { return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // Validation Blueprints
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'name', 'role', 'createdAt']) &&
+             data.keys().size() == 4 &&
+             data.email is string && data.email.size() <= 200 &&
+             data.name is string && data.name.size() <= 100 &&
+             data.role in ['admin', 'student'] &&
+             data.createdAt == request.time;
+    }
+
+    function isValidStudent(data) {
+      return data.keys().hasAll(['userId', 'name', 'course', 'isActive', 'createdAt']) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.name is string && data.name.size() <= 100 &&
+             data.course is string && data.course.size() <= 100 &&
+             data.isActive is bool &&
+             data.createdAt == request.time;
+    }
+
+    function isValidAttendance(data) {
+      return data.keys().hasAll(['studentId', 'date', 'status', 'markedBy', 'timestamp']) &&
+             data.keys().size() == 5 &&
+             data.studentId is string &&
+             data.date is string && data.date.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             data.status in ['present', 'absent'] &&
+             data.markedBy == request.auth.uid &&
+             data.timestamp == request.time;
+    }
+
+    function isValidApplication(data) {
+      return data.keys().hasAll(['name', 'course', 'email', 'status', 'createdAt']) &&
+             data.name is string && data.name.size() <= 100 &&
+             data.course is string && data.course.size() <= 100 &&
+             data.email is string && data.email.size() <= 200 &&
+             data.status == 'pending' &&
+             data.createdAt == request.time;
+    }
+
+    // Match Rules
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['name']) &&
+                    incoming().name is string && incoming().name.size() <= 100;
+      allow update: if isAdmin();
+    }
+
+    match /students/{studentId} {
+      allow list: if isAdmin();
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin() || (isSignedIn() && isValidStudent(incoming()));
+      allow update: if isAdmin();
+    }
+
+    match /attendance/{attendanceId} {
+      allow list: if isAdmin() || (isSignedIn() && resource.data.markedBy == request.auth.uid);
+      allow get: if isSignedIn() && (resource.data.markedBy == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidAttendance(incoming()) && isValidId(attendanceId);
+      allow delete: if isAdmin();
+    }
+
+    match /applications/{applicationId} {
+      allow create: if isValidApplication(incoming()) && isValidId(applicationId);
+      allow list, get: if isAdmin();
+      allow update: if isAdmin() &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['status']) &&
+                    incoming().status in ['approved', 'rejected'];
+    }
+
+    match /admins/{userId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Only manageable via Google Cloud Console or Service Account
+    }
+  }
+}
